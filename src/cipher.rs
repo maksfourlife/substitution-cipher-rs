@@ -1,6 +1,10 @@
 use derive_more::Display;
-use num::{one, zero, Integer};
-use std::{collections::HashMap, hash::Hash};
+use num::{one, Integer, Signed};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    iter::{repeat_with, RepeatWith, Zip},
+};
 
 pub trait Cipher {
     type Error;
@@ -88,6 +92,38 @@ mod substitution_cipher_test {
     }
 }
 
+#[derive(Clone, Debug)]
+struct Alphabet {
+    direct: HashMap<u8, usize>,
+    inverse: HashMap<usize, u8>,
+}
+
+impl Alphabet {
+    /// Constructs alphabet. If 'a' has repeating characters, returns None
+    pub fn new(a: impl AsRef<[u8]>) -> Option<Self> {
+        let inverse: HashMap<_, _> = a.as_ref().iter().copied().enumerate().collect();
+        let direct = inverse_map(inverse.clone());
+        if inverse.len() != direct.len() {
+            None
+        } else {
+            Some(Self { inverse, direct })
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.direct.len()
+    }
+
+    pub fn get_index(&self, l: &u8) -> Option<usize> {
+        self.direct.get(l).copied()
+    }
+
+    pub fn get_letter(&self, i: &usize) -> Option<u8> {
+        self.inverse.get(i).copied()
+    }
+}
+
+/// Common errors for both 'AffineCipher' and 'AffineRecurrentCipher'
 #[derive(Debug, Display)]
 pub enum AffineCipherError {
     #[display(fmt = "alphabet has repeating characters")]
@@ -102,10 +138,7 @@ pub enum AffineCipherError {
 /// https://en.wikipedia.org/wiki/Affine_cipher
 #[derive(Debug, Clone)]
 pub struct AffineCipher {
-    /// maps characters to indices
-    alph: HashMap<u8, usize>,
-    /// maps indices to characters
-    inverse_alph: HashMap<usize, u8>,
+    alph: Alphabet,
     /// modular multiplicative inverse of 'a' over 'm'
     inverse_a: usize,
     /// affine 'a' param
@@ -114,30 +147,40 @@ pub struct AffineCipher {
     b: usize,
 }
 
-fn get_alph_map(alph: impl IntoIterator<Item = u8>) -> HashMap<usize, u8> {
-    alph.into_iter().enumerate().collect()
+/// Calculates modular multiplicative inverse for given integers.
+/// Returns None if they are not coprime.
+/// https://www.geeksforgeeks.org/multiplicative-inverse-under-modulo-m/
+#[inline]
+fn modular_multiplicative_inverse<A: Integer + Signed + Copy>(a: A, m: A) -> Option<A> {
+    let gcd = a.extended_gcd(&m);
+    if gcd.gcd != one() {
+        None
+    } else {
+        Some(gcd.x)
+    }
+}
+
+#[inline]
+fn absmod<A: Integer + Signed + Copy>(a: A, m: A) -> A {
+    if a.is_negative() {
+        let n = (a / m).abs() + one();
+        (a + n * m) % m
+    } else {
+        a % m
+    }
 }
 
 impl AffineCipher {
     pub fn new(alph: impl AsRef<[u8]>, a: usize, b: usize) -> Result<Self, AffineCipherError> {
-        let inverse_alph = get_alph_map(alph.as_ref().iter().copied());
-        let alph = inverse_map(inverse_alph.clone());
-        if alph.len() != inverse_alph.len() {
-            return Err(AffineCipherError::RepeatingAlphabet);
-        }
-        // https://www.geeksforgeeks.org/multiplicative-inverse-under-modulo-m/
-        let gcd = (a as i64).extended_gcd(&(alph.len() as i64));
-        if gcd.gcd != one() {
-            return Err(AffineCipherError::NotCoprime);
-        }
-        let mut inverse_a = gcd.x;
-        if inverse_a < zero() {
-            inverse_a += alph.len() as i64;
-        }
-        let inverse_a: usize = inverse_a.try_into().unwrap();
+        let alph = Alphabet::new(alph).ok_or(AffineCipherError::RepeatingAlphabet)?;
+        let m = alph.len();
+        let inverse_a = absmod(
+            modular_multiplicative_inverse(a as i64, m as i64)
+                .ok_or(AffineCipherError::NotCoprime)?,
+            m as i64,
+        ) as usize;
         Ok(Self {
             alph,
-            inverse_alph,
             inverse_a,
             a,
             b,
@@ -153,10 +196,150 @@ impl Cipher for AffineCipher {
             .as_ref()
             .iter()
             .copied()
-            .map(|ch| match self.alph.get(&ch) {
+            .map(|ch| match self.alph.get_index(&ch) {
                 Some(x) => {
                     let y = (self.a * x + self.b) % self.alph.len();
-                    Ok(self.inverse_alph.get(&y).copied().unwrap())
+                    Ok(self.alph.get_letter(&y).unwrap())
+                }
+                _ => Err(AffineCipherError::UnknownCharacter(ch)),
+            })
+            .collect()
+    }
+
+    fn decrypt(&self, cipher_text: impl AsRef<[u8]>) -> Result<Vec<u8>, Self::Error> {
+        let m = self.alph.len();
+        let inverse_b = absmod(-(self.b as i64), m as i64) as usize;
+        cipher_text
+            .as_ref()
+            .iter()
+            .copied()
+            .map(|ch| match self.alph.get_index(&ch) {
+                Some(y) => {
+                    // y + inverse_b === y - b (mod m)
+                    let x = (self.inverse_a * (y + inverse_b)) % m;
+                    Ok(self.alph.get_letter(&x).unwrap())
+                }
+                _ => Err(AffineCipherError::UnknownCharacter(ch)),
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+const ALPH: &'static str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ,! ";
+
+#[cfg(test)]
+mod affine_cipher_test {
+    use super::{absmod, AffineCipher, Cipher};
+    use crate::cipher::ALPH;
+
+    #[test]
+    fn test_absmod() {
+        assert_eq!(absmod(-2, 7), 5);
+        assert_eq!(absmod(-9, 7), 5);
+        assert_eq!(absmod(-51, 7), 5);
+    }
+
+    #[test]
+    fn test_affine_works() {
+        let cipher = AffineCipher::new(ALPH, 376, 111).unwrap();
+        let message = "Hello, world!";
+        let cipher_text = cipher.encrypt(message).unwrap();
+        let restored = cipher.decrypt(&cipher_text).unwrap();
+        // println!("cipher_text: {}", String::from_utf8(cipher_text).unwrap());
+        // println!("restored: {}", String::from_utf8(restored.clone()).unwrap());
+        assert_ne!(message.as_bytes(), cipher_text); // sanity
+        assert_eq!(message.as_bytes(), restored);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AffineRecurrentCipher {
+    alph: Alphabet,
+    a1: usize,
+    a2: usize,
+    b1: usize,
+    b2: usize,
+}
+
+impl AffineRecurrentCipher {
+    pub fn new(
+        alph: impl AsRef<[u8]>,
+        a1: usize,
+        a2: usize,
+        b1: usize,
+        b2: usize,
+    ) -> Result<Self, AffineCipherError> {
+        let alph = Alphabet::new(alph).ok_or(AffineCipherError::RepeatingAlphabet)?;
+        Ok(Self {
+            alph,
+            a1,
+            a2,
+            b1,
+            b2,
+        })
+    }
+
+    pub fn iter_a(&self) -> RepeatWith<impl FnMut() -> usize> {
+        let m = self.alph.len();
+        let mut a1 = self.a1;
+        let mut a2 = self.a2;
+        let mut i = 0;
+        repeat_with(move || {
+            let x = match i {
+                0 => a1,
+                1 => a2,
+                _ => {
+                    let tmp = (a1 * a2) % m;
+                    a1 = std::mem::replace(&mut a2, tmp);
+                    a2
+                }
+            };
+            i += 1;
+            x
+        })
+    }
+
+    pub fn iter_b(&self) -> RepeatWith<impl FnMut() -> usize> {
+        let m = self.alph.len();
+        let mut b1 = self.b1;
+        let mut b2 = self.b2;
+        let mut i = 0;
+        repeat_with(move || {
+            let x = match i {
+                0 => b1,
+                1 => b2,
+                _ => {
+                    let tmp = (b1 + b2) % m;
+                    b1 = std::mem::replace(&mut b2, tmp);
+                    b2
+                }
+            };
+            i += 1;
+            x
+        })
+    }
+
+    fn iter_keys(
+        &self,
+    ) -> Zip<RepeatWith<impl FnMut() -> usize>, RepeatWith<impl FnMut() -> usize>> {
+        self.iter_a().zip(self.iter_b())
+    }
+}
+
+impl Cipher for AffineRecurrentCipher {
+    type Error = AffineCipherError;
+
+    fn encrypt(&self, message: impl AsRef<[u8]>) -> Result<Vec<u8>, Self::Error> {
+        message
+            .as_ref()
+            .iter()
+            .copied()
+            .zip(self.iter_keys())
+            .map(|(ch, (a, b))| match self.alph.get_index(&ch) {
+                Some(x) => {
+                    let y = (a * x + b) % self.alph.len();
+                    Ok(self.alph.get_letter(&y).unwrap())
                 }
                 _ => Err(AffineCipherError::UnknownCharacter(ch)),
             })
@@ -169,13 +352,17 @@ impl Cipher for AffineCipher {
             .as_ref()
             .iter()
             .copied()
-            .map(|ch| match self.alph.get(&ch) {
+            .zip(self.iter_keys())
+            .map(|(ch, (a, b))| match self.alph.get_index(&ch) {
                 Some(y) => {
-                    // todo: either
-                    //  - use i64
-                    //  - substract with modulo
-                    let x = (self.inverse_a * (m + y - self.b)) % m;
-                    Ok(self.inverse_alph.get(&x).copied().unwrap())
+                    let inverse_a = absmod(
+                        modular_multiplicative_inverse(a as i64, m as i64)
+                            .ok_or(AffineCipherError::NotCoprime)?,
+                        m as i64,
+                    ) as usize;
+                    let inverse_b = absmod(-(b as i64), m as i64) as usize;
+                    let x = (inverse_a * (y + inverse_b)) % m;
+                    Ok(self.alph.get_letter(&x).unwrap())
                 }
                 _ => Err(AffineCipherError::UnknownCharacter(ch)),
             })
@@ -184,20 +371,31 @@ impl Cipher for AffineCipher {
 }
 
 #[cfg(test)]
-mod affine_cipher_test {
-    use super::{AffineCipher, Cipher};
-
-    const ALPH: &'static str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ,! ";
+mod affine_recurrent_cipher_test {
+    use super::{AffineRecurrentCipher, Cipher, ALPH};
 
     #[test]
-    fn test_affine_works() {
-        let cipher = AffineCipher::new(ALPH, 376, 11).unwrap();
-        let message = "Hello, world!";
-        let cipher_text = cipher.encrypt(message).unwrap();
+    fn test_iter_keys() {
+        let cipher = AffineRecurrentCipher::new(ALPH, 356, 357, 111, 112).unwrap();
+        let mut it = cipher.iter_keys();
+        println!("{:?}", it.next());
+        println!("{:?}", it.next());
+        println!("{:?}", it.next());
+        println!("{:?}", it.next());
+        println!("{:?}", it.next());
+        println!("{:?}", it.next());
+        println!("{:?}", it.next());
+        println!("{:?}", it.next());
+    }
+
+    #[test]
+    fn test_symmetric() {
+        let cipher = AffineRecurrentCipher::new(ALPH, 356, 357, 111, 112).unwrap();
+        let msg = "Hello, world!";
+        let cipher_text = cipher.encrypt(&msg).unwrap();
         let restored = cipher.decrypt(&cipher_text).unwrap();
-        // println!("cipher_text: {}", String::from_utf8(cipher_text).unwrap());
-        // println!("restored: {}", String::from_utf8(restored.clone()).unwrap());
-        assert_ne!(message.as_bytes(), cipher_text); // sanity
-        assert_eq!(message.as_bytes(), restored);
+        // println!("cipher_text: {:?}", String::from_utf8(cipher_text.clone()));
+        // println!("restored: {:?}", String::from_utf8(restored.clone()));
+        assert_eq!(msg.as_bytes(), restored);
     }
 }
