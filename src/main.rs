@@ -1,9 +1,8 @@
+use crate::cipher::{AffineRecurrentCipher, SubstitutionCipher};
 use args::{Args, CipherName, Command};
 use cipher::{AffineCipher, Cipher};
 use clap::Parser;
 use std::{io::stdin, str::FromStr};
-
-use crate::cipher::{AffineRecurrentCipher, SubstitutionCipher};
 
 pub mod args;
 pub mod cipher;
