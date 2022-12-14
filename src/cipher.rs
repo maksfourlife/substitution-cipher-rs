@@ -11,6 +11,8 @@ use std::{
 pub enum CipherError {
     #[display(fmt = "alphabet has repeating characters")]
     RepeatingAlphabet,
+    #[display(fmt = "alphabets are not symmetric")]
+    NonSymmetricAlphabets,
     #[display(fmt = "'a' and 'm' values are not coprime")]
     NotCoprime,
     #[display(fmt = "unknown character {}", _0)]
@@ -35,57 +37,67 @@ where
     result
 }
 
-fn substitue(map: &HashMap<u8, u8>, data: &[u8]) -> Result<Vec<u8>, CipherError> {
+fn substitue(
+    alph1: &Alphabet,
+    alph2: &Alphabet,
+    data: impl AsRef<[u8]>,
+) -> Result<Vec<u8>, CipherError> {
     data.as_ref()
         .iter()
-        .map(|k| map.get(k).copied().ok_or(CipherError::UnknownCharacter(*k)))
+        .map(|k| {
+            Ok(alph1
+                .get_letter(
+                    &alph2
+                        .get_index(k)
+                        .ok_or(CipherError::UnknownCharacter(*k))?,
+                )
+                .expect("alph1 != alph2^-1"))
+        })
         .collect()
 }
 
 #[derive(Clone, Debug)]
 pub struct SubstitutionCipher {
-    map: HashMap<u8, u8>,
-    inverse_map: HashMap<u8, u8>,
+    alph1: Alphabet,
+    alph2: Alphabet,
 }
 
 impl SubstitutionCipher {
-    pub fn new(map: HashMap<u8, u8>) -> Result<Self, CipherError> {
-        let inverse_map = inverse_map(map.clone());
-        if map.len() != inverse_map.len() {
+    pub fn new(alph1: impl AsRef<[u8]>, alph2: impl AsRef<[u8]>) -> Result<Self, CipherError> {
+        let alph1 = Alphabet::new(alph1).ok_or(CipherError::RepeatingAlphabet)?;
+        let alph2 = Alphabet::new(alph2).ok_or(CipherError::RepeatingAlphabet)?;
+        if alph1.len() != alph2.len() {
             Err(CipherError::RepeatingAlphabet)
         } else {
-            Ok(Self { map, inverse_map })
+            Ok(Self { alph1, alph2 })
         }
     }
 }
 
 impl Cipher for SubstitutionCipher {
     fn encrypt(&self, message: &[u8]) -> Result<Vec<u8>, CipherError> {
-        substitue(&self.map, message)
+        substitue(&self.alph1, &self.alph2, message)
     }
 
     fn decrypt(&self, cipher_text: &[u8]) -> Result<Vec<u8>, CipherError> {
-        substitue(&self.inverse_map, cipher_text)
+        substitue(&self.alph2, &self.alph1, cipher_text)
     }
 }
 
 #[cfg(test)]
 mod substitution_cipher_test {
     use super::{Cipher, SubstitutionCipher};
-    use std::collections::HashMap;
 
     #[test]
     fn test_substitution_symmetric() {
-        let mut key = HashMap::new();
-        key.insert(1, 2);
-        key.insert(2, 3);
-        key.insert(3, 1);
-        let cipher = SubstitutionCipher::new(key).unwrap();
-        let message = vec![1, 1, 2, 2, 3, 1, 1, 2, 3, 2, 3];
-        let cipher_text = cipher.encrypt(&message).unwrap();
+        let alph1 = "ABCDEFG";
+        let alph2 = "BCDEFGA";
+        let cipher = SubstitutionCipher::new(alph1, alph2).unwrap();
+        let message = "BECAGFFGFGAB";
+        let cipher_text = cipher.encrypt(message.as_bytes()).unwrap();
         let restored_message = cipher.decrypt(&cipher_text).unwrap();
-        assert_ne!(message, cipher_text);
-        assert_eq!(message, restored_message);
+        assert_ne!(message.as_bytes(), cipher_text);
+        assert_eq!(message.as_bytes(), restored_message);
     }
 }
 
@@ -97,7 +109,7 @@ struct Alphabet {
 
 impl Alphabet {
     /// Constructs alphabet. If 'a' has repeating characters, returns None
-    pub fn new(a: &[u8]) -> Option<Self> {
+    pub fn new(a: impl AsRef<[u8]>) -> Option<Self> {
         let inverse: HashMap<_, _> = a.as_ref().iter().copied().enumerate().collect();
         let direct = inverse_map(inverse.clone());
         if inverse.len() != direct.len() {
@@ -157,7 +169,7 @@ fn absmod<A: Integer + Signed + Copy>(a: A, m: A) -> A {
 }
 
 impl AffineCipher {
-    pub fn new(alph: &[u8], a: usize, b: usize) -> Result<Self, CipherError> {
+    pub fn new(alph: impl AsRef<[u8]>, a: usize, b: usize) -> Result<Self, CipherError> {
         let alph = Alphabet::new(alph).ok_or(CipherError::RepeatingAlphabet)?;
         let m = alph.len();
         let inverse_a = absmod(
@@ -247,7 +259,7 @@ pub struct AffineRecurrentCipher {
 
 impl AffineRecurrentCipher {
     pub fn new(
-        alph: &[u8],
+        alph: impl AsRef<[u8]>,
         a1: usize,
         a2: usize,
         b1: usize,
@@ -357,7 +369,7 @@ mod affine_recurrent_cipher_test {
 
     #[test]
     fn test_iter_keys() {
-        let cipher = AffineRecurrentCipher::new(ALPH.as_ref(), 356, 357, 111, 112).unwrap();
+        let cipher = AffineRecurrentCipher::new(ALPH, 356, 357, 111, 112).unwrap();
         let mut it = cipher.iter_keys();
         println!("{:?}", it.next());
         println!("{:?}", it.next());

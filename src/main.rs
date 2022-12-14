@@ -3,7 +3,7 @@ use cipher::{AffineCipher, Cipher};
 use clap::Parser;
 use std::{io::stdin, str::FromStr};
 
-use crate::cipher::AffineRecurrentCipher;
+use crate::cipher::{AffineRecurrentCipher, SubstitutionCipher};
 
 pub mod args;
 pub mod cipher;
@@ -24,6 +24,13 @@ fn main() -> anyhow::Result<()> {
         cipher_name,
     } = Args::parse();
     let cipher: Box<dyn Cipher> = match cipher_name {
+        CipherName::Substitution => {
+            println!("Source alphabet:");
+            let alph1: String = read_from_str()?;
+            println!("Destination alphabet:");
+            let alph2: String = read_from_str()?;
+            Box::new(SubstitutionCipher::new(alph1, alph2)?)
+        }
         CipherName::Affine => {
             println!("Alphabet:");
             let alph: String = read_from_str()?;
@@ -31,7 +38,7 @@ fn main() -> anyhow::Result<()> {
             let a: usize = read_from_str()?;
             println!("B:");
             let b: usize = read_from_str()?;
-            Box::new(AffineCipher::new(alph.as_bytes(), a, b)?)
+            Box::new(AffineCipher::new(alph, a, b)?)
         }
         CipherName::AffineRecurrent => {
             println!("Alphabet:");
@@ -44,9 +51,8 @@ fn main() -> anyhow::Result<()> {
             let b1: usize = read_from_str()?;
             println!("B2:");
             let b2: usize = read_from_str()?;
-            Box::new(AffineRecurrentCipher::new(alph.as_bytes(), a1, a2, b1, b2)?)
+            Box::new(AffineRecurrentCipher::new(alph, a1, a2, b1, b2)?)
         }
-        _ => todo!(),
     };
     match command {
         Command::Encrypt => {
